@@ -4,6 +4,43 @@ module ActiveRecord
   module QueryMethods
     extend ActiveSupport::Concern
 
+    # OrChain objects respond to all methods of the relation they were called
+    # on, but rather than delegating directly they build up a "right" relation
+    # from these calls and join the query with the "left" relation.
+    class OrChain
+      def initialize(left_scope)
+        @left_scope = left_scope
+      end
+
+      def method_missing(name, *args) # :nodoc:
+        if left_scope.respond_to?(name)
+          join_with_or { send(name, *args) }
+        else
+          super
+        end
+      end
+
+      def respond_to_missing?(name, _) # :nodoc:
+        left_scope.respond_to?(name) || super
+      end
+
+      private
+
+      attr_reader :left_scope
+
+      def join_with_or(&block)
+        grouping = Arel::Nodes::Grouping.new(left_scope.where_values)
+        right_scope = unscoped.instance_exec(&block)
+        right_grouping = Arel::Nodes::Grouping.new(Arel::Nodes::And.new(right_scope.where_values))
+        or_grouping = grouping.or(right_grouping)
+        unscoped.where(or_grouping.to_sql)
+      end
+
+      def unscoped
+        left_scope.unscoped
+      end
+    end
+
     # WhereChain objects act as placeholder for queries in which #where does not have any parameter.
     # In this case, #where must be chained with #not to return a new relation.
     class WhereChain
@@ -543,6 +580,20 @@ module ActiveRecord
         self.where_values += build_where(opts, rest)
         self
       end
+    end
+
+    # Returns a new relation joining the queries to the left and the right with
+    # a sql OR.
+    #
+    # +or+ takes no arguments.
+    #
+    #     User.where(name: 'Jon').or.where(email: 'jon@example.com')
+    #     # SELECT * FROM users WHERE (name = 'Jon') OR (email = 'jon@example.com')
+    #
+    #     User.where(name: 'Jon').or.where(role: 'admin').where(approved: true)
+    #     # SELECT * from users where (name = 'Jon') OR (role = 'admin' AND approved = true)
+    def or
+      OrChain.new(self)
     end
 
     # Allows to specify a HAVING clause. Note that you can't use HAVING
